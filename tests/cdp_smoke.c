@@ -259,6 +259,115 @@ static void test_reset(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Test: queue overflow stress (low priority from TODO.md)           */
+/* ------------------------------------------------------------------ */
+static void test_queue_overflow(void)
+{
+    TEST("queue overflow stress test (count bounded, feed returns error)");
+    cdp_config_t cfg = {
+        .event_queue_size = 2,
+        .max_message_size = 16u * 1024u * 1024u,
+        .auto_id = 1
+    };
+    cdp_ctx_t *ctx = cdp_create_with_config(&cfg);
+    if (!ctx) { FAIL("create with config failed"); return; }
+
+    const char *evjson = "{\"method\":\"Page.loadEventFired\",\"params\":{}}";
+    size_t evlen = strlen(evjson);
+
+    /* Fill exactly */
+    if (cdp_feed_input(ctx, evjson, evlen) != 0) { FAIL("feed1"); cdp_destroy(ctx); return; }
+    if (cdp_feed_input(ctx, evjson, evlen) != 0) { FAIL("feed2"); cdp_destroy(ctx); return; }
+    /* Overflow feed should return error and not grow beyond capacity */
+    int res = cdp_feed_input(ctx, evjson, evlen);
+    if (res != -1) {
+        FAIL("expected -1 on overflow feed"); cdp_destroy(ctx); return;
+    }
+    if (cdp_event_count(ctx) != 2) {
+        FAIL("count exceeded capacity"); cdp_destroy(ctx); return;
+    }
+
+    cdp_destroy(ctx);
+    PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: large batch feed (low priority performance test from TODO)  */
+/* ------------------------------------------------------------------ */
+static void test_large_batch_feed(void)
+{
+    TEST("large batch feed (performance/robustness)");
+    cdp_ctx_t *ctx = cdp_create();
+    const char *ev = "{\"method\":\"Page.loadEventFired\",\"params\":{}}";
+    size_t evlen = strlen(ev);
+    int i;
+    for (i = 0; i < 100; i++) {
+        cdp_feed_input(ctx, ev, evlen);
+    }
+    /* Default queue is 64, so we expect overflow handling but no crash */
+    int count = cdp_event_count(ctx);
+    if (count < 1 || count > 64) {
+        FAIL("unexpected final count after batch"); cdp_destroy(ctx); return;
+    }
+    cdp_destroy(ctx);
+    PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Security domain classification (medium-term TODO item)      */
+/* ------------------------------------------------------------------ */
+static void test_security_domain(void)
+{
+    TEST("Security domain classification (medium priority)");
+    cdp_ctx_t *ctx = cdp_create();
+    const char *json = "{\"method\":\"Security.securityStateChanged\",\"params\":{}}";
+    if (cdp_feed_input(ctx, json, strlen(json)) != 0) {
+        FAIL("feed failed"); cdp_destroy(ctx); return;
+    }
+    cdp_event_t ev;
+    if (cdp_next_event(ctx, &ev) != 0) {
+        FAIL("no event"); cdp_destroy(ctx); return;
+    }
+    if (ev.data.event_data.domain != CDP_DOMAIN_OTHER) {
+        FAIL("Security domain not classified"); cdp_destroy(ctx); return;
+    }
+    cdp_destroy(ctx);
+    PASS();
+}
+
+/* ------------------------------------------------------------------ */
+/*  Test: Additional domain classifications (Storage, ServiceWorker, WebAudio, WebAuthn) */
+/* ------------------------------------------------------------------ */
+static void test_additional_domains(void)
+{
+    TEST("Additional domains (Storage, ServiceWorker, WebAudio, WebAuthn)");
+    cdp_ctx_t *ctx = cdp_create();
+
+    const char *storage = "{\"method\":\"Storage.getCookies\",\"params\":{}}";
+    cdp_feed_input(ctx, storage, strlen(storage));
+    cdp_event_t ev1; cdp_next_event(ctx, &ev1);
+    if (ev1.data.event_data.domain != CDP_DOMAIN_OTHER) { FAIL("Storage"); cdp_destroy(ctx); return; }
+
+    const char *sw = "{\"method\":\"ServiceWorker.workerVersionUpdated\",\"params\":{}}";
+    cdp_feed_input(ctx, sw, strlen(sw));
+    cdp_event_t ev2; cdp_next_event(ctx, &ev2);
+    if (ev2.data.event_data.domain != CDP_DOMAIN_OTHER) { FAIL("ServiceWorker"); cdp_destroy(ctx); return; }
+
+    const char *audio = "{\"method\":\"WebAudio.getRealtimeData\",\"params\":{}}";
+    cdp_feed_input(ctx, audio, strlen(audio));
+    cdp_event_t ev3; cdp_next_event(ctx, &ev3);
+    if (ev3.data.event_data.domain != CDP_DOMAIN_OTHER) { FAIL("WebAudio"); cdp_destroy(ctx); return; }
+
+    const char *authn = "{\"method\":\"WebAuthn.enable\",\"params\":{}}";
+    cdp_feed_input(ctx, authn, strlen(authn));
+    cdp_event_t ev4; cdp_next_event(ctx, &ev4);
+    if (ev4.data.event_data.domain != CDP_DOMAIN_OTHER) { FAIL("WebAuthn"); cdp_destroy(ctx); return; }
+
+    cdp_destroy(ctx);
+    PASS();
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main                                                              */
 /* ------------------------------------------------------------------ */
 int main(void)
@@ -278,6 +387,10 @@ int main(void)
     test_auto_id();
     test_event_count();
     test_reset();
+    test_queue_overflow();
+    test_large_batch_feed();
+    test_security_domain();
+    test_additional_domains();
 
     printf("--- %d/%d passed ---\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
